@@ -61,16 +61,19 @@ async def get_trade_size(
     mode = await queries.get_sizing_mode()
 
     if mode == "half-kelly":
-        win_rate = await queries.get_win_rate_for_kelly()
+        # Determine demo mode FIRST so win rate uses the correct trade history
+        demo = await queries.is_demo_mode()
+
+        win_rate = await queries.get_win_rate_for_kelly(demo=demo)
         if win_rate < 0:
             log.info(
-                "Half-Kelly: insufficient data (fewer than %d resolved signals), "
+                "Half-Kelly: insufficient data (fewer than %d resolved %s trades), "
                 "falling back to fixed",
                 cfg.KELLY_MIN_SAMPLES,
+                "demo" if demo else "real",
             )
             return await queries.get_trade_amount()
 
-        demo = await queries.is_demo_mode()
         if demo:
             bankroll = await queries.get_demo_balance()
         else:
@@ -83,9 +86,22 @@ async def get_trade_size(
                 log.warning("Half-Kelly real mode: using trade_amount as bankroll proxy")
 
         size = compute_half_kelly(win_rate, entry_price, bankroll)
+
         if size <= 0:
-            log.info("Half-Kelly computed $0 — using minimum $1.00")
+            # Negative edge: Kelly math says don't bet — compute fraction for logging
+            b = (1.0 / entry_price - 1.0) if entry_price > 0 and entry_price < 1 else 0
+            kelly_fraction = ((win_rate * b - (1.0 - win_rate)) / b) if b > 0 else float("-inf")
+            log.info(
+                "Half-Kelly: negative edge (win_rate=%.2f, entry=$%.4f, kelly=%.3f) "
+                "— using minimum $1.00",
+                win_rate, entry_price, kelly_fraction,
+            )
             size = 1.00
+        else:
+            log.info(
+                "Half-Kelly: win_rate=%.2f, entry=$%.4f, stake=$%.2f",
+                win_rate, entry_price, size,
+            )
         return size
 
     # Default: fixed

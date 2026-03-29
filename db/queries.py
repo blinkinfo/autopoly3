@@ -73,11 +73,10 @@ async def get_sizing_mode() -> str:
     return val if val else cfg.DEFAULT_SIZING_MODE
 
 
-async def get_win_rate_for_kelly() -> float:
-    """Return historical signal win rate (non-skipped, resolved signals).
+async def get_win_rate_for_kelly_real() -> float:
+    """Return win rate from real (non-demo) resolved trades.
 
-    Returns -1.0 (sentinel) if fewer than ``cfg.KELLY_MIN_SAMPLES`` resolved
-    signals exist -- indicating insufficient data for Kelly sizing.
+    Returns -1.0 sentinel if fewer than cfg.KELLY_MIN_SAMPLES resolved trades.
     Returns 0.0 when the true win rate is 0% (enough samples, all losses).
     """
     async with aiosqlite.connect(_db()) as db:
@@ -85,7 +84,7 @@ async def get_win_rate_for_kelly() -> float:
         cursor = await db.execute(
             "SELECT COUNT(*) as total, "
             "SUM(CASE WHEN is_win = 1 THEN 1 ELSE 0 END) as wins "
-            "FROM signals WHERE skipped = 0 AND is_win IS NOT NULL"
+            "FROM trades WHERE is_demo = 0 AND is_win IS NOT NULL"
         )
         row = await cursor.fetchone()
         total = row["total"]
@@ -93,6 +92,37 @@ async def get_win_rate_for_kelly() -> float:
     if total < cfg.KELLY_MIN_SAMPLES:
         return -1.0
     return wins / total
+
+
+async def get_win_rate_for_kelly_demo() -> float:
+    """Return win rate from demo resolved trades.
+
+    Returns -1.0 sentinel if fewer than cfg.KELLY_MIN_SAMPLES resolved demo trades.
+    Returns 0.0 when the true win rate is 0% (enough samples, all losses).
+    """
+    async with aiosqlite.connect(_db()) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT COUNT(*) as total, "
+            "SUM(CASE WHEN is_win = 1 THEN 1 ELSE 0 END) as wins "
+            "FROM trades WHERE is_demo = 1 AND is_win IS NOT NULL"
+        )
+        row = await cursor.fetchone()
+        total = row["total"]
+        wins = row["wins"] or 0
+    if total < cfg.KELLY_MIN_SAMPLES:
+        return -1.0
+    return wins / total
+
+
+async def get_win_rate_for_kelly(demo: bool = False) -> float:
+    """Dispatcher: return win rate for Kelly sizing based on mode.
+
+    Routes to demo or real trade history depending on the `demo` flag.
+    """
+    if demo:
+        return await get_win_rate_for_kelly_demo()
+    return await get_win_rate_for_kelly_real()
 
 
 # ---------------------------------------------------------------------------
