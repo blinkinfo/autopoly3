@@ -6,21 +6,21 @@ import asyncio
 import logging
 from typing import Any
 
+from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+
 log = logging.getLogger(__name__)
 
 
 async def get_balance(poly_client) -> float | None:
-    """Return USDC balance via the CLOB client's get_bal_allowance."""
+    """Return USDC balance in dollars via get_balance_allowance (COLLATERAL)."""
     try:
-        # py-clob-client exposes get_balance_allowance but it needs params.
-        # Safest: call the underlying session directly.
-        # Falls back to None if unavailable.
-        bal = await asyncio.to_thread(
-            lambda: getattr(poly_client.client, "get_collateral", lambda: None)()
+        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        result = await asyncio.to_thread(
+            poly_client.client.get_balance_allowance, params
         )
-        if bal is not None:
-            return round(float(bal), 2)
-        return None
+        # Result is a dict with 'balance' in wei (1 USDC = 1_000_000 wei)
+        balance_usdc = int(result["balance"]) / 1e6
+        return round(balance_usdc, 2)
     except Exception:
         log.exception("Failed to fetch balance")
         return None
