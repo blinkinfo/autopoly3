@@ -184,18 +184,45 @@ async def insert_trade(
         return cursor.lastrowid  # type: ignore[return-value]
 
 
-async def update_trade_status(trade_id: int, status: str, order_id: str | None = None) -> None:
+async def update_trade_status(
+    trade_id: int,
+    status: str,
+    order_id: str | None = None,
+    order_status_detail: str | None = None,
+    fill_price: float | None = None,
+) -> None:
     async with aiosqlite.connect(_db()) as db:
-        if order_id:
-            await db.execute(
-                "UPDATE trades SET status = ?, order_id = ? WHERE id = ?",
-                (status, order_id, trade_id),
-            )
-        else:
-            await db.execute(
-                "UPDATE trades SET status = ? WHERE id = ?",
-                (status, trade_id),
-            )
+        fields = ["status = ?"]
+        params: list[Any] = [status]
+        if order_id is not None:
+            fields.append("order_id = ?")
+            params.append(order_id)
+        if order_status_detail is not None:
+            fields.append("order_status_detail = ?")
+            params.append(order_status_detail)
+        if fill_price is not None:
+            fields.append("fill_price = ?")
+            params.append(fill_price)
+        params.append(trade_id)
+        await db.execute(
+            f"UPDATE trades SET {', '.join(fields)} WHERE id = ?",
+            tuple(params),
+        )
+        await db.commit()
+
+
+async def update_trade_retry(
+    trade_id: int,
+    last_error: str,
+    order_status_detail: str,
+) -> None:
+    """Increment retry_count and record the latest error for a trade."""
+    async with aiosqlite.connect(_db()) as db:
+        await db.execute(
+            "UPDATE trades SET retry_count = retry_count + 1, "
+            "last_error = ?, order_status_detail = ? WHERE id = ?",
+            (last_error, order_status_detail, trade_id),
+        )
         await db.commit()
 
 

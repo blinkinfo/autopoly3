@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS trades (
     pnl REAL,
     resolved_at TIMESTAMP,
     is_demo INTEGER DEFAULT 0,
+    retry_count INTEGER DEFAULT 0,
+    last_error TEXT,
+    order_status_detail TEXT,
     FOREIGN KEY (signal_id) REFERENCES signals(id)
 );
 
@@ -81,6 +84,30 @@ async def _migrate(db: aiosqlite.Connection) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         # Silently ignore if the column already exists ("duplicate column name")
+        if "duplicate column" not in str(exc).lower():
+            raise
+
+    try:
+        await db.execute(
+            "ALTER TABLE trades ADD COLUMN retry_count INTEGER DEFAULT 0"
+        )
+    except Exception as exc:  # noqa: BLE001
+        if "duplicate column" not in str(exc).lower():
+            raise
+
+    try:
+        await db.execute(
+            "ALTER TABLE trades ADD COLUMN last_error TEXT"
+        )
+    except Exception as exc:  # noqa: BLE001
+        if "duplicate column" not in str(exc).lower():
+            raise
+
+    try:
+        await db.execute(
+            "ALTER TABLE trades ADD COLUMN order_status_detail TEXT"
+        )
+    except Exception as exc:  # noqa: BLE001
         if "duplicate column" not in str(exc).lower():
             raise
 

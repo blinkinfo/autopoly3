@@ -17,6 +17,7 @@ from core.redeemer import redeem_winning_positions
 from db import queries
 from polymarket import account as pm_account
 from polymarket.markets import SLOT_DURATION, slot_info_from_ts
+from core.trader import execute_fok_order
 
 log = logging.getLogger(__name__)
 
@@ -355,8 +356,9 @@ async def _check_and_trade() -> None:
                 )
 
         elif autotrade and _poly_client is not None and token_id:
-            # Real mode: place FOK order on Polymarket
+            # Real mode: place FOK order on Polymarket with retry logic
             amount_usdc = round(trade_amount, 2)
+            slot_end_epoch = slot_ts + SLOT_DURATION
             trade_id = await queries.insert_trade(
                 signal_id=signal_id,
                 slot_start=slot_start_full,
@@ -367,17 +369,49 @@ async def _check_and_trade() -> None:
                 status="pending",
                 demo=False,
             )
-            try:
-                response = await trader.place_fok_order(_poly_client, token_id, amount_usdc)
-                order_id = None
-                if isinstance(response, dict):
-                    order_id = response.get("orderID") or response.get("order_id")
-                await queries.update_trade_status(trade_id, "filled", order_id=order_id)
-                log.info("Trade filled: order_id=%s", order_id)
-            except Exception:
-                log.exception("FOK order failed")
-                await queries.update_trade_status(trade_id, "failed")
-                await _send_telegram(f"\u274c Trade FAILED for {side} slot {slot_start_str}-{slot_end_str} UTC")
+
+            result = await execute_fok_order(
+                _poly_client, token_id, amount_usdc, slot_end_ts=slot_end_epoch,
+            )
+
+            if result.status == "filled":
+                await queries.update_trade_status(
+                    trade_id, "filled",
+                    order_id=result.order_id,
+                    order_status_detail=result.error_category or "filled_ok",
+                )
+                if result.attempts > 1:
+                    await queries.update_trade_retry(
+                        trade_id,
+                        last_error=result.error or "",
+                        order_status_detail=result.error_category or "filled_after_retry",
+                    )
+                    await _send_telegram(
+                        f"\u2705 Trade FILLED after {result.attempts} attempt(s): "
+                        f"{side} ${amount_usdc:.2f} slot {slot_start_str}-{slot_end_str} UTC"
+                    )
+                log.info("Trade filled: order_id=%s attempts=%d", result.order_id, result.attempts)
+            else:
+                # Failed / FOK killed / timeout
+                await queries.update_trade_status(
+                    trade_id, "failed",
+                    order_status_detail=result.error_category or result.status,
+                )
+                if result.attempts > 0:
+                    await queries.update_trade_retry(
+                        trade_id,
+                        last_error=result.error or "unknown",
+                        order_status_detail=result.error_category or result.status,
+                    )
+                detail = f" ({result.error_category})" if result.error_category else ""
+                await _send_telegram(
+                    f"\u274c Trade FAILED{detail} after {result.attempts} attempt(s) for "
+                    f"{side} slot {slot_start_str}-{slot_end_str} UTC"
+                )
+                log.error(
+                    "Trade failed: status=%s attempts=%d error=%s",
+                    result.status, result.attempts, result.error,
+                )
                 trade_id = None
 
         # 6. Schedule resolution after slot N+1 ends
