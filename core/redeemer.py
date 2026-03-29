@@ -86,15 +86,66 @@ def _parse_amount_usdc(position: dict[str, Any]) -> float:
 # Redemption execution (blocking — called via asyncio.to_thread)
 # ---------------------------------------------------------------------------
 
-def _build_poly_web3_service(clob_client: Any) -> Any:
-    """Construct a PolyWeb3Service using builder credentials from config."""
-    builder_config = BuilderConfig(
+def _derive_builder_config() -> Any:
+    """Derive BuilderConfig automatically from POLYMARKET_PRIVATE_KEY.
+
+    The CLOB L2 api key/secret/passphrase are deterministically derived
+    from the wallet private key via EIP-712 — no separate env vars needed.
+    This uses the same py-clob-client that the rest of the app already
+    depends on, so there is zero extra credential management overhead.
+
+    Raises RuntimeError if POLYMARKET_PRIVATE_KEY is not set.
+    """
+    if not cfg.POLYMARKET_PRIVATE_KEY:
+        raise RuntimeError(
+            "POLYMARKET_PRIVATE_KEY is not set — cannot derive builder credentials"
+        )
+
+    # Import here to avoid a hard dependency at module level.
+    # py-clob-client is already in requirements.txt.
+    from py_clob_client.client import ClobClient  # type: ignore[import]
+
+    # Initialise a temporary L1-only client (no api creds yet).
+    temp_client = ClobClient(
+        host=cfg.CLOB_HOST,
+        key=cfg.POLYMARKET_PRIVATE_KEY,
+        chain_id=cfg.CHAIN_ID,
+    )
+
+    # Derive (or create) the L2 api credentials from the private key.
+    # This call signs an EIP-712 message — deterministic, idempotent.
+    api_creds = temp_client.create_or_derive_api_creds()
+
+    # api_creds is an ApiCreds namedtuple/object with .api_key, .api_secret,
+    # .api_passphrase attributes (field names vary by py-clob-client version).
+    key = getattr(api_creds, "api_key", None) or getattr(api_creds, "apiKey", None)
+    secret = getattr(api_creds, "api_secret", None) or getattr(api_creds, "secret", None)
+    passphrase = (
+        getattr(api_creds, "api_passphrase", None)
+        or getattr(api_creds, "passphrase", None)
+    )
+
+    if not key or not secret or not passphrase:
+        raise RuntimeError(
+            f"create_or_derive_api_creds() returned incomplete credentials: {api_creds!r}"
+        )
+
+    return BuilderConfig(
         local_builder_creds=BuilderApiKeyCreds(
-            key=cfg.POLY_BUILDER_API_KEY,
-            secret=cfg.POLY_BUILDER_SECRET,
-            passphrase=cfg.POLY_BUILDER_PASSPHRASE,
+            key=key,
+            secret=secret,
+            passphrase=passphrase,
         )
     )
+
+
+def _build_poly_web3_service(clob_client: Any) -> Any:
+    """Construct a PolyWeb3Service with auto-derived builder credentials.
+
+    Builder credentials (api key/secret/passphrase) are derived on-the-fly
+    from POLYMARKET_PRIVATE_KEY — no separate env vars required.
+    """
+    builder_config = _derive_builder_config()
 
     relay_client = RelayClient(
         relayer_url=cfg.RELAYER_URL,

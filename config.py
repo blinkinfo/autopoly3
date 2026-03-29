@@ -53,10 +53,6 @@ NEG_RISK_ADAPTER_ADDRESS: str = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
 USDC_ADDRESS: str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 WRAPPED_COLLATERAL_ADDRESS: str = "0x3A3BD7bb9528E159577F7C2e685CC81A765002E2"
 RELAYER_URL: str = "https://relayer-v2.polymarket.com"
-
-# ---------------------------------------------------------------------------
-# Builder / Relayer credentials
-# ---------------------------------------------------------------------------
-POLY_BUILDER_API_KEY: str | None = os.getenv("POLY_BUILDER_API_KEY")
-POLY_BUILDER_SECRET: str | None = os.getenv("POLY_BUILDER_SECRET")
-POLY_BUILDER_PASSPHRASE: str | None = os.getenv("POLY_BUILDER_PASSPHRASE")
+# NOTE: Builder / relayer API credentials (api key, secret, passphrase) are
+# derived automatically from POLYMARKET_PRIVATE_KEY at redemption time via
+# py-clob-client's create_or_derive_api_creds(). No separate env vars needed.
