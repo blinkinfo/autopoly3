@@ -83,7 +83,6 @@ async def _migrate(db: aiosqlite.Connection) -> None:
             "ALTER TABLE trades ADD COLUMN is_demo INTEGER DEFAULT 0"
         )
     except Exception as exc:  # noqa: BLE001
-        # Silently ignore if the column already exists ("duplicate column name")
         if "duplicate column" not in str(exc).lower():
             raise
 
@@ -106,6 +105,24 @@ async def _migrate(db: aiosqlite.Connection) -> None:
     try:
         await db.execute(
             "ALTER TABLE trades ADD COLUMN order_status_detail TEXT"
+        )
+    except Exception as exc:  # noqa: BLE001
+        if "duplicate column" not in str(exc).lower():
+            raise
+
+    # Multi-asset migration — adds asset column to signals and trades.
+    # DEFAULT 'BTC' preserves all existing rows as BTC history.
+    try:
+        await db.execute(
+            "ALTER TABLE signals ADD COLUMN asset TEXT DEFAULT 'BTC'"
+        )
+    except Exception as exc:  # noqa: BLE001
+        if "duplicate column" not in str(exc).lower():
+            raise
+
+    try:
+        await db.execute(
+            "ALTER TABLE trades ADD COLUMN asset TEXT DEFAULT 'BTC'"
         )
     except Exception as exc:  # noqa: BLE001
         if "duplicate column" not in str(exc).lower():

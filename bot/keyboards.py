@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+import config as cfg
+
 
 # ---------------------------------------------------------------------------
 # Main menu
@@ -27,7 +29,7 @@ def main_menu() -> InlineKeyboardMarkup:
 
 
 # ---------------------------------------------------------------------------
-# Settings  (Suggestion 1: grouped into logical rows, reduced from 8 to 5 rows)
+# Settings
 # ---------------------------------------------------------------------------
 
 def settings_keyboard(
@@ -43,30 +45,25 @@ def settings_keyboard(
     demo_label = "\U0001f4dd Demo: ON" if demo_on else "\U0001f4dd Demo: OFF"
     redeem_label = "\U0001f4b0 Redeem: ON" if auto_redeem_on else "\U0001f4b0 Redeem: OFF"
     return InlineKeyboardMarkup([
-        # Row 1 — AutoTrade toggle  |  Trade Amount
         [
             InlineKeyboardButton(at_label, callback_data="toggle_autotrade"),
             InlineKeyboardButton(f"\U0001f4b5 ${trade_amount:.2f}", callback_data="change_amount"),
         ],
-        # Row 2 — Sizing mode  |  Auto Redeem
         [
             InlineKeyboardButton(f"\U0001f4cf Sizing: {sizing_label}", callback_data="toggle_sizing"),
             InlineKeyboardButton(redeem_label, callback_data="toggle_auto_redeem"),
         ],
-        # Row 3 — Demo toggle  |  Demo Balance
         [
             InlineKeyboardButton(demo_label, callback_data="toggle_demo"),
             InlineKeyboardButton(f"\U0001f4b0 Balance: ${demo_balance:.2f}", callback_data="change_demo_bankroll"),
         ],
-        # Row 4 — Reset Demo (destructive — requires confirmation)
         [InlineKeyboardButton("\U0001f504 Reset Demo", callback_data="reset_demo")],
-        # Row 5 — Navigation
         [InlineKeyboardButton("\U0001f519 Back to Menu", callback_data="cmd_menu")],
     ])
 
 
 # ---------------------------------------------------------------------------
-# Reset Demo confirmation keyboard  (Suggestion 2)
+# Reset Demo confirmation keyboard
 # ---------------------------------------------------------------------------
 
 def reset_demo_confirm_keyboard() -> InlineKeyboardMarkup:
@@ -79,11 +76,12 @@ def reset_demo_confirm_keyboard() -> InlineKeyboardMarkup:
 
 
 # ---------------------------------------------------------------------------
-# Filter rows (Last 10 / Last 50 / All Time)
+# Filter rows (Last 10 / Last 50 / All Time + asset filter)
 # ---------------------------------------------------------------------------
 
-def signal_filter_row(active: str = "all") -> InlineKeyboardMarkup:
-    buttons = [
+def signal_filter_row(active: str = "all", active_asset: str = "ALL") -> InlineKeyboardMarkup:
+    # Time filter row
+    time_buttons = [
         InlineKeyboardButton(
             ("[Last 10]" if active == "10" else "Last 10"),
             callback_data="signals_10",
@@ -97,14 +95,26 @@ def signal_filter_row(active: str = "all") -> InlineKeyboardMarkup:
             callback_data="signals_all",
         ),
     ]
+    # Asset filter row
+    asset_buttons = []
+    for asset in cfg.SUPPORTED_ASSETS:
+        label = f"[{asset}]" if active_asset == asset else asset
+        asset_buttons.append(
+            InlineKeyboardButton(label, callback_data=f"signals_asset_{asset}")
+        )
+    all_label = "[ALL]" if active_asset == "ALL" else "ALL"
+    asset_buttons.append(InlineKeyboardButton(all_label, callback_data="signals_asset_ALL"))
+
     return InlineKeyboardMarkup([
-        buttons,
+        time_buttons,
+        asset_buttons,
         [InlineKeyboardButton("\U0001f519 Back to Menu", callback_data="cmd_menu")],
     ])
 
 
-def trade_filter_row(active: str = "all", demo: bool = False) -> InlineKeyboardMarkup:
-    buttons = [
+def trade_filter_row(active: str = "all", demo: bool = False, active_asset: str = "ALL") -> InlineKeyboardMarkup:
+    # Time filter row
+    time_buttons = [
         InlineKeyboardButton(
             ("[Last 10]" if active == "10" else "Last 10"),
             callback_data="trades_10",
@@ -125,9 +135,20 @@ def trade_filter_row(active: str = "all", demo: bool = False) -> InlineKeyboardM
         InlineKeyboardButton(real_label, callback_data="trades_mode_real"),
         InlineKeyboardButton(demo_label, callback_data="trades_mode_demo"),
     ]
+    # Asset filter row
+    asset_buttons = []
+    for asset in cfg.SUPPORTED_ASSETS:
+        label = f"[{asset}]" if active_asset == asset else asset
+        asset_buttons.append(
+            InlineKeyboardButton(label, callback_data=f"trades_asset_{asset}")
+        )
+    all_label = "[ALL]" if active_asset == "ALL" else "ALL"
+    asset_buttons.append(InlineKeyboardButton(all_label, callback_data="trades_asset_ALL"))
+
     return InlineKeyboardMarkup([
-        buttons,
+        time_buttons,
         mode_row,
+        asset_buttons,
         [InlineKeyboardButton("\U0001f519 Back to Menu", callback_data="cmd_menu")],
     ])
 
@@ -145,11 +166,10 @@ def demo_dashboard() -> InlineKeyboardMarkup:
 
 
 # ---------------------------------------------------------------------------
-# Input-wait cancel keyboard  (Suggestion 4)
+# Input-wait cancel keyboard
 # ---------------------------------------------------------------------------
 
 def cancel_input_keyboard() -> InlineKeyboardMarkup:
-    """Shown while the bot is waiting for the user to type a value."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("\u274c Cancel", callback_data="cmd_settings")],
     ])

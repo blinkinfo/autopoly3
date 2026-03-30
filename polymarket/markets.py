@@ -1,4 +1,4 @@
-"""BTC 5-min slot helpers — compute slot boundaries & fetch prices from Gamma + CLOB APIs."""
+"""5-min slot helpers — compute slot boundaries & fetch prices from Gamma + CLOB APIs."""
 
 from __future__ import annotations
 
@@ -26,11 +26,11 @@ def _slot_start_ts(dt: datetime) -> int:
     return epoch - (epoch % SLOT_DURATION)
 
 
-def get_current_slot_info() -> dict[str, Any]:
-    """Compute current slot N boundaries.
+def get_current_slot_info(asset: str = "BTC") -> dict[str, Any]:
+    """Compute current slot N boundaries for the given asset.
 
     Returns dict with:
-      slot_start_dt, slot_end_dt, slot_start_ts, slug,
+      slot_start_dt, slot_end_dt, slot_start_ts, slug, asset,
       slot_start_str ("HH:MM"), slot_end_str ("HH:MM")
     """
     now = datetime.now(timezone.utc)
@@ -38,8 +38,10 @@ def get_current_slot_info() -> dict[str, Any]:
     end_ts = start_ts + SLOT_DURATION
     start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
     end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
-    slug = f"btc-updown-5m-{start_ts}"
+    prefix = cfg.ASSET_SLUG_PREFIX.get(asset, asset.lower())
+    slug = f"{prefix}-updown-5m-{start_ts}"
     return {
+        "asset": asset,
         "slot_start_dt": start_dt,
         "slot_end_dt": end_dt,
         "slot_start_ts": start_ts,
@@ -51,15 +53,17 @@ def get_current_slot_info() -> dict[str, Any]:
     }
 
 
-def get_next_slot_info() -> dict[str, Any]:
-    """Compute next slot N+1 boundaries."""
+def get_next_slot_info(asset: str = "BTC") -> dict[str, Any]:
+    """Compute next slot N+1 boundaries for the given asset."""
     now = datetime.now(timezone.utc)
     start_ts = _slot_start_ts(now) + SLOT_DURATION
     end_ts = start_ts + SLOT_DURATION
     start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
     end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
-    slug = f"btc-updown-5m-{start_ts}"
+    prefix = cfg.ASSET_SLUG_PREFIX.get(asset, asset.lower())
+    slug = f"{prefix}-updown-5m-{start_ts}"
     return {
+        "asset": asset,
         "slot_start_dt": start_dt,
         "slot_end_dt": end_dt,
         "slot_start_ts": start_ts,
@@ -71,13 +75,15 @@ def get_next_slot_info() -> dict[str, Any]:
     }
 
 
-def slot_info_from_ts(start_ts: int) -> dict[str, Any]:
-    """Build slot info dict from an arbitrary start timestamp."""
+def slot_info_from_ts(start_ts: int, asset: str = "BTC") -> dict[str, Any]:
+    """Build slot info dict from an arbitrary start timestamp for the given asset."""
     end_ts = start_ts + SLOT_DURATION
     start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
     end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
-    slug = f"btc-updown-5m-{start_ts}"
+    prefix = cfg.ASSET_SLUG_PREFIX.get(asset, asset.lower())
+    slug = f"{prefix}-updown-5m-{start_ts}"
     return {
+        "asset": asset,
         "slot_start_dt": start_dt,
         "slot_end_dt": end_dt,
         "slot_start_ts": start_ts,
@@ -121,8 +127,6 @@ async def get_clob_best_ask(token_id: str, client: httpx.AsyncClient) -> float |
         return None
 
     try:
-        # Bug fix: use min() over all ask prices instead of relying on sort
-        # order, which may change. The best (lowest) ask is what a buyer pays.
         prices = [float(a["price"]) for a in asks]
         best_ask = min(prices)
         log.debug(
@@ -140,7 +144,7 @@ async def get_clob_best_ask(token_id: str, client: httpx.AsyncClient) -> float |
 # ---------------------------------------------------------------------------
 
 async def get_slot_prices(slug: str) -> dict[str, Any] | None:
-    """Fetch live ask prices & token IDs for a BTC 5-min slot.
+    """Fetch live ask prices & token IDs for a 5-min slot.
 
     Step 1 — Gamma API: get token IDs for Up and Down outcomes.
     Step 2 — CLOB API: get best ask price for each token (what you actually pay).

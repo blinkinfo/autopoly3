@@ -1,418 +1,310 @@
-"""Telegram command and callback-query handlers."""
+"""Telegram command and callback handlers."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from telegram import Update
-from telegram.error import BadRequest
-from telegram.ext import (
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import ContextTypes
 
-import config as cfg
-from bot.formatters import (
-    format_demo_status,
-    format_error,
-    format_help,
-    format_menu_header,
-    format_recent_signals,
-    format_recent_trades,
-    format_redemption_notification,
-    format_signal_stats,
-    format_status,
-    format_trade_stats,
-)
-from bot.keyboards import (
-    back_to_menu,
-    cancel_input_keyboard,
-    demo_dashboard,
-    main_menu,
-    reset_demo_confirm_keyboard,
-    settings_keyboard,
-    signal_filter_row,
-    trade_filter_row,
-)
-from bot.middleware import auth_check
+from bot import formatters, keyboards
 from db import queries
-from polymarket import account as pm_account
+from core import scheduler as sched
 
 log = logging.getLogger(__name__)
 
-# Set at startup by main.py
-_start_time: datetime = datetime.now(timezone.utc)
-_poly_client: Any = None
+# Startup timestamp for uptime display
+_BOT_START_TIME = datetime.now(timezone.utc)
 
-
-def set_poly_client(client: Any) -> None:
-    global _poly_client
-    _poly_client = client
-
-
-def set_start_time() -> None:
-    global _start_time
-    _start_time = datetime.now(timezone.utc)
-
-
-def _uptime() -> str:
-    delta = datetime.now(timezone.utc) - _start_time
-    total_seconds = int(delta.total_seconds())
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, _ = divmod(remainder, 60)
-    if hours:
-        return f"{hours}h {minutes}m"
-    return f"{minutes}m"
+# States for awaiting user text input
+AWAIT_AMOUNT = "await_amount"
+AWAIT_DEMO_BANKROLL = "await_demo_bankroll"
 
 
 # ---------------------------------------------------------------------------
-# Safe edit helper — silently ignores 'Message is not modified' errors
+# Helpers
 # ---------------------------------------------------------------------------
 
-async def _safe_edit(query, text, reply_markup=None, parse_mode="HTML"):
-    """Edit a message, silently ignoring 'not modified' errors."""
-    try:
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
-    except BadRequest as e:
-        if "not modified" in str(e).lower():
-            pass  # Content unchanged — not an error
-        else:
-            raise
+def _uptime_str() -> str:
+    delta = datetime.now(timezone.utc) - _BOT_START_TIME
+    h, rem = divmod(int(delta.total_seconds()), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}h {m}m {s}s"
 
 
-# ---------------------------------------------------------------------------
-# Suggestion 6: dynamic menu header with live stats
-# ---------------------------------------------------------------------------
-
-async def _build_menu_text() -> str:
-    """Build main-menu header text with live signal/trade stats."""
-    try:
-        sig_stats = await queries.get_signal_stats()
-        trade_stats = await queries.get_trade_stats(demo=False)
-        # Try to get pending count from pending queue file without importing
-        # core module (avoids circular imports); fall back to 0 gracefully.
-        pending_count = 0
+async def _edit_or_reply(update: Update, text: str, reply_markup=None) -> None:
+    if update.callback_query:
         try:
-            import json
-            import os
-            pq_path = os.path.join("data", "pending_slots.json")
-            if os.path.exists(pq_path):
-                with open(pq_path) as f:
-                    pq = json.load(f)
-                pending_count = len(pq) if isinstance(pq, list) else 0
+            await update.callback_query.edit_message_text(
+                text, parse_mode="HTML", reply_markup=reply_markup
+            )
         except Exception:
-            pending_count = 0
-        return format_menu_header(
-            total_signals=sig_stats["total_signals"],
-            win_pct=sig_stats["win_pct"],
-            net_pnl=trade_stats["net_pnl"],
-            total_trades=trade_stats["total_trades"],
-            pending_count=pending_count,
+            await update.callback_query.message.reply_text(
+                text, parse_mode="HTML", reply_markup=reply_markup
+            )
+    elif update.message:
+        await update.message.reply_text(
+            text, parse_mode="HTML", reply_markup=reply_markup
         )
-    except Exception:
-        # Fallback to static header if DB isn't ready yet
-        return "\U0001f916 <b>AutoPoly Menu</b>\n\nSelect an option:"
 
 
 # ---------------------------------------------------------------------------
-# /start
+# Signal & Trade renderers (accept asset filter)
 # ---------------------------------------------------------------------------
 
-@auth_check
+async def _render_signals(update: Update, limit: int | None, asset: str | None = None) -> None:
+    label = f"Last {limit}" if limit else "All Time"
+    if asset and asset != "ALL":
+        label += f" | {asset}"
+    stats = await queries.get_signal_stats(limit=limit, asset=asset if asset != "ALL" else None)
+    signals = await queries.get_recent_signals(n=min(limit or 20, 50), asset=asset if asset != "ALL" else None)
+    text = (
+        formatters.format_signal_stats(stats, label=label)
+        + "\n"
+        + formatters.format_recent_signals(signals)
+    )
+    active = str(limit) if limit else "all"
+    active_asset = asset if asset else "ALL"
+    await _edit_or_reply(update, text, keyboards.signal_filter_row(active, active_asset))
+
+
+async def _render_trades(update: Update, limit: int | None, demo: bool = False, asset: str | None = None) -> None:
+    label = f"Last {limit}" if limit else "All Time"
+    if asset and asset != "ALL":
+        label += f" | {asset}"
+    stats = await queries.get_trade_stats(limit=limit, demo=demo, asset=asset if asset != "ALL" else None)
+    trades = await queries.get_recent_trades(n=min(limit or 20, 50), demo=demo, asset=asset if asset != "ALL" else None)
+    text = (
+        formatters.format_trade_stats(stats, label=label, demo=demo)
+        + "\n"
+        + formatters.format_recent_trades(trades)
+    )
+    active = str(limit) if limit else "all"
+    active_asset = asset if asset else "ALL"
+    await _edit_or_reply(update, text, keyboards.trade_filter_row(active, demo=demo, active_asset=active_asset))
+
+
+# ---------------------------------------------------------------------------
+# Command handlers
+# ---------------------------------------------------------------------------
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = await _build_menu_text()
-    await update.message.reply_text(text, reply_markup=main_menu(), parse_mode="HTML")
+    stats = await queries.get_signal_stats()
+    trade_stats = await queries.get_trade_stats()
+    pending_count = len(await queries.get_unresolved_signals())
+    text = formatters.format_menu_header(
+        total_signals=stats["total_signals"],
+        win_pct=stats["win_pct"],
+        net_pnl=trade_stats["net_pnl"],
+        total_trades=trade_stats["total_trades"],
+        pending_count=pending_count,
+    )
+    await _edit_or_reply(update, text, keyboards.main_menu())
 
 
-# ---------------------------------------------------------------------------
-# /status
-# ---------------------------------------------------------------------------
-
-@auth_check
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        connected = False
-        balance = None
-        positions = []
-        if _poly_client:
-            connected = await pm_account.get_connection_status(_poly_client)
-            balance = await pm_account.get_balance(_poly_client)
-            positions = await pm_account.get_open_positions(_poly_client)
+    poly_client = sched._poly_client
+    connected = poly_client is not None
+    balance: float | None = None
+    if connected:
+        try:
+            from polymarket import account as pm_account
+            balance = await pm_account.get_balance(poly_client)
+        except Exception:
+            pass
 
-        autotrade = await queries.is_autotrade_enabled()
-        trade_amount = await queries.get_trade_amount()
-        demo_mode = await queries.is_demo_mode()
-        sizing_mode = await queries.get_sizing_mode()
-        demo_balance = await queries.get_demo_balance() if demo_mode else None
-        last_sig = await queries.get_last_signal()
-        last_sig_str = None
-        if last_sig:
-            ss = last_sig["slot_start"].split(" ")[-1] if " " in last_sig["slot_start"] else last_sig["slot_start"]
-            last_sig_str = f"{ss} UTC ({last_sig['side']})"
+    autotrade = await queries.is_autotrade_enabled()
+    trade_amount = await queries.get_trade_amount()
+    demo_mode = await queries.is_demo_mode()
+    demo_balance = await queries.get_demo_balance() if demo_mode else None
+    sizing_mode = await queries.get_sizing_mode()
 
-        text = format_status(
-            connected=connected,
-            balance=balance,
-            autotrade=autotrade,
-            trade_amount=trade_amount,
-            open_positions=len(positions),
-            uptime_str=_uptime(),
-            last_signal=last_sig_str,
-            demo_mode=demo_mode,
-            sizing_mode=sizing_mode,
-            demo_balance=demo_balance,
-        )
-        if update.callback_query:
-            await update.callback_query.answer()
-            await _safe_edit(update.callback_query, text, reply_markup=back_to_menu())
-        else:
-            target = update.message
-            if target is None:
-                return
-            await target.reply_text(text, reply_markup=back_to_menu(), parse_mode="HTML")
-    except Exception as exc:
-        log.exception("cmd_status failed")
-        if update.callback_query:
-            await _safe_edit(
-                update.callback_query,
-                format_error("Status check", exc),
-                reply_markup=back_to_menu(),
-            )
-        elif update.message:
-            await update.message.reply_text(format_error("Status check", exc), parse_mode="HTML")
+    last_sig_row = await queries.get_last_signal()
+    last_signal_str: str | None = None
+    if last_sig_row:
+        side = last_sig_row.get("side") or "Skip"
+        asset = last_sig_row.get("asset") or "BTC"
+        ss = last_sig_row["slot_start"]
+        ss_time = ss.split(" ")[-1] if " " in ss else ss
+        last_signal_str = f"[{asset}] {side} @ {ss_time} UTC"
+
+    unresolved = await queries.get_unresolved_trades()
+    text = formatters.format_status(
+        connected=connected,
+        balance=balance,
+        autotrade=autotrade,
+        trade_amount=trade_amount,
+        open_positions=len(unresolved),
+        uptime_str=_uptime_str(),
+        last_signal=last_signal_str,
+        demo_mode=demo_mode,
+        sizing_mode=sizing_mode,
+        demo_balance=demo_balance,
+    )
+    await _edit_or_reply(update, text, keyboards.back_to_menu())
 
 
-# ---------------------------------------------------------------------------
-# /signals
-# ---------------------------------------------------------------------------
-
-async def _render_signals(update: Update, limit: int | None, active: str) -> None:
-    try:
-        stats = await queries.get_signal_stats(limit=limit)
-        label = {"10": "Last 10", "50": "Last 50", "all": "All Time"}[active]
-        text = format_signal_stats(stats, label)
-        recent = await queries.get_recent_signals(10)
-        text += format_recent_signals(recent)
-        kb = signal_filter_row(active)
-        if update.callback_query:
-            await update.callback_query.answer()
-            await _safe_edit(update.callback_query, text, reply_markup=kb)
-        else:
-            await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
-    except Exception as exc:
-        log.exception("_render_signals failed")
-        if update.callback_query:
-            await _safe_edit(
-                update.callback_query,
-                format_error("Loading signals", exc),
-                reply_markup=back_to_menu(),
-            )
-        elif update.message:
-            await update.message.reply_text(format_error("Loading signals", exc), parse_mode="HTML")
-
-
-@auth_check
 async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _render_signals(update, limit=None, active="all")
+    active_asset = context.user_data.get("signals_asset_filter", "ALL")
+    await _render_signals(update, limit=None, asset=active_asset)
 
 
-# ---------------------------------------------------------------------------
-# /trades
-# ---------------------------------------------------------------------------
-
-async def _render_trades(update: Update, limit: int | None, active: str, demo: bool = False) -> None:
-    try:
-        stats = await queries.get_trade_stats(limit=limit, demo=demo)
-        label = {"10": "Last 10", "50": "Last 50", "all": "All Time"}[active]
-        text = format_trade_stats(stats, label, demo=demo)
-        recent = await queries.get_recent_trades(10, demo=demo)
-        text += format_recent_trades(recent)
-        kb = trade_filter_row(active, demo=demo)
-        if update.callback_query:
-            await update.callback_query.answer()
-            await _safe_edit(update.callback_query, text, reply_markup=kb)
-        else:
-            await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
-    except Exception as exc:
-        log.exception("_render_trades failed")
-        if update.callback_query:
-            await _safe_edit(
-                update.callback_query,
-                format_error("Loading trades", exc),
-                reply_markup=back_to_menu(),
-            )
-        elif update.message:
-            await update.message.reply_text(format_error("Loading trades", exc), parse_mode="HTML")
-
-
-@auth_check
 async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _render_trades(update, limit=None, active="all", demo=False)
+    demo = await queries.is_demo_mode()
+    active_asset = context.user_data.get("trades_asset_filter", "ALL")
+    await _render_trades(update, limit=None, demo=demo, asset=active_asset)
 
 
-# ---------------------------------------------------------------------------
-# /demo
-# ---------------------------------------------------------------------------
-
-@auth_check
-async def cmd_demo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        bankroll = await queries.get_demo_bankroll()
-        balance = await queries.get_demo_balance()
-        stats = await queries.get_trade_stats(demo=True)
-        trade_count = stats["total_trades"]
-
-        text = format_demo_status(
-            bankroll=bankroll,
-            balance=balance,
-            trade_count=trade_count,
-        )
-        kb = demo_dashboard()
-        if update.callback_query:
-            await update.callback_query.answer()
-            await _safe_edit(update.callback_query, text, reply_markup=kb)
-        else:
-            await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
-    except Exception as exc:
-        log.exception("cmd_demo failed")
-        if update.callback_query:
-            await _safe_edit(
-                update.callback_query,
-                format_error("Demo dashboard", exc),
-                reply_markup=back_to_menu(),
-            )
-        elif update.message:
-            await update.message.reply_text(format_error("Demo dashboard", exc), parse_mode="HTML")
-
-
-# ---------------------------------------------------------------------------
-# /settings
-# ---------------------------------------------------------------------------
-
-@auth_check
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     autotrade = await queries.is_autotrade_enabled()
     trade_amount = await queries.get_trade_amount()
     sizing_mode = await queries.get_sizing_mode()
     demo_on = await queries.is_demo_mode()
     demo_balance = await queries.get_demo_balance()
-    auto_redeem = await queries.is_auto_redeem_enabled()
+    auto_redeem_on = await queries.is_auto_redeem_enabled()
     text = (
         "\u2699\ufe0f <b>Settings</b>\n\n"
-        "<b>TRADING</b>  AutoTrade | Amount | Sizing | Redeem\n"
-        "<b>DEMO</b>  Toggle | Balance | Reset\n\n"
-        "Tap a button to change:"
+        f"AutoTrade: {'ON' if autotrade else 'OFF'}\n"
+        f"Mode: {'Demo' if demo_on else 'Real'}\n"
+        f"Sizing: {'Fixed' if sizing_mode == 'fixed' else 'Half-Kelly'}\n"
+        f"Trade Amount: ${trade_amount:.2f}\n"
+        f"Demo Balance: ${demo_balance:.2f}\n"
+        f"Auto-Redeem: {'ON' if auto_redeem_on else 'OFF'}"
     )
-    kb = settings_keyboard(autotrade, trade_amount, sizing_mode, demo_on, demo_balance, auto_redeem_on=auto_redeem)
-    if update.callback_query:
-        await update.callback_query.answer()
-        await _safe_edit(update.callback_query, text, reply_markup=kb)
-    else:
-        await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
+    kb = keyboards.settings_keyboard(
+        autotrade_on=autotrade,
+        trade_amount=trade_amount,
+        sizing_mode=sizing_mode,
+        demo_on=demo_on,
+        demo_balance=demo_balance,
+        auto_redeem_on=auto_redeem_on,
+    )
+    await _edit_or_reply(update, text, kb)
 
 
-# ---------------------------------------------------------------------------
-# /help
-# ---------------------------------------------------------------------------
+async def cmd_demo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    bankroll = await queries.get_demo_bankroll()
+    balance = await queries.get_demo_balance()
+    stats = await queries.get_trade_stats(demo=True)
+    text = formatters.format_demo_status(
+        bankroll=bankroll,
+        balance=balance,
+        trade_count=stats["total_trades"],
+    )
+    await _edit_or_reply(update, text, keyboards.demo_dashboard())
 
-@auth_check
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = format_help()
-    if update.callback_query:
-        await update.callback_query.answer()
-        await _safe_edit(update.callback_query, text, reply_markup=back_to_menu())
-    else:
-        await update.message.reply_text(text, reply_markup=back_to_menu(), parse_mode="HTML")
+    await _edit_or_reply(update, formatters.format_help(), keyboards.back_to_menu())
 
 
 # ---------------------------------------------------------------------------
-# Callback query router
+# Callback router
 # ---------------------------------------------------------------------------
 
-@auth_check
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    await query.answer()
     data = query.data
 
-    # -----------------------------------------------------------------------
-    # Navigation
-    # -----------------------------------------------------------------------
+    # Awaiting input state — ignore callbacks
+    state = context.user_data.get("awaiting")
+    if state:
+        return
+
+    # ---- Navigation ----
     if data == "cmd_menu":
-        # Suggestion 4: clear any pending input flags when user navigates away
-        context.user_data.pop("awaiting_amount", None)
-        context.user_data.pop("awaiting_demo_bankroll", None)
-        await query.answer()
-        text = await _build_menu_text()
-        await _safe_edit(query, text, reply_markup=main_menu())
+        await cmd_start(update, context)
 
     elif data == "cmd_status":
         await cmd_status(update, context)
 
     elif data == "cmd_signals":
-        await _render_signals(update, limit=None, active="all")
+        active_asset = context.user_data.get("signals_asset_filter", "ALL")
+        await _render_signals(update, limit=None, asset=active_asset)
 
     elif data == "cmd_trades":
-        await _render_trades(update, limit=None, active="all", demo=False)
+        demo = await queries.is_demo_mode()
+        active_asset = context.user_data.get("trades_asset_filter", "ALL")
+        await _render_trades(update, limit=None, demo=demo, asset=active_asset)
 
     elif data == "cmd_settings":
-        # Suggestion 4: clear any pending input flags when navigating to settings
-        context.user_data.pop("awaiting_amount", None)
-        context.user_data.pop("awaiting_demo_bankroll", None)
         await cmd_settings(update, context)
-
-    elif data == "cmd_help":
-        await cmd_help(update, context)
 
     elif data == "cmd_demo":
         await cmd_demo(update, context)
 
-    # -----------------------------------------------------------------------
-    # Signal filters
-    # -----------------------------------------------------------------------
+    elif data == "cmd_help":
+        await cmd_help(update, context)
+
+    # ---- Signal time filters ----
     elif data == "signals_10":
-        await _render_signals(update, limit=10, active="10")
+        context.user_data["signals_limit"] = 10
+        active_asset = context.user_data.get("signals_asset_filter", "ALL")
+        await _render_signals(update, limit=10, asset=active_asset)
+
     elif data == "signals_50":
-        await _render_signals(update, limit=50, active="50")
+        context.user_data["signals_limit"] = 50
+        active_asset = context.user_data.get("signals_asset_filter", "ALL")
+        await _render_signals(update, limit=50, asset=active_asset)
+
     elif data == "signals_all":
-        await _render_signals(update, limit=None, active="all")
+        context.user_data["signals_limit"] = None
+        active_asset = context.user_data.get("signals_asset_filter", "ALL")
+        await _render_signals(update, limit=None, asset=active_asset)
 
-    # -----------------------------------------------------------------------
-    # Trade filters
-    # -----------------------------------------------------------------------
+    # ---- Signal asset filters ----
+    elif data.startswith("signals_asset_"):
+        asset = data[len("signals_asset_"):]
+        context.user_data["signals_asset_filter"] = asset
+        limit = context.user_data.get("signals_limit")
+        await _render_signals(update, limit=limit, asset=asset)
+
+    # ---- Trade time filters ----
     elif data == "trades_10":
-        demo = context.user_data.get("trades_demo_filter", False)
-        await _render_trades(update, limit=10, active="10", demo=demo)
+        context.user_data["trades_limit"] = 10
+        demo = await queries.is_demo_mode()
+        active_asset = context.user_data.get("trades_asset_filter", "ALL")
+        await _render_trades(update, limit=10, demo=demo, asset=active_asset)
+
     elif data == "trades_50":
-        demo = context.user_data.get("trades_demo_filter", False)
-        await _render_trades(update, limit=50, active="50", demo=demo)
+        context.user_data["trades_limit"] = 50
+        demo = await queries.is_demo_mode()
+        active_asset = context.user_data.get("trades_asset_filter", "ALL")
+        await _render_trades(update, limit=50, demo=demo, asset=active_asset)
+
     elif data == "trades_all":
-        demo = context.user_data.get("trades_demo_filter", False)
-        await _render_trades(update, limit=None, active="all", demo=demo)
+        context.user_data["trades_limit"] = None
+        demo = await queries.is_demo_mode()
+        active_asset = context.user_data.get("trades_asset_filter", "ALL")
+        await _render_trades(update, limit=None, demo=demo, asset=active_asset)
 
+    # ---- Trade mode filters ----
     elif data == "trades_mode_real":
-        context.user_data["trades_demo_filter"] = False
-        await _render_trades(update, limit=None, active="all", demo=False)
-    elif data == "trades_mode_demo":
-        context.user_data["trades_demo_filter"] = True
-        await _render_trades(update, limit=None, active="all", demo=True)
+        limit = context.user_data.get("trades_limit")
+        active_asset = context.user_data.get("trades_asset_filter", "ALL")
+        await _render_trades(update, limit=limit, demo=False, asset=active_asset)
 
-    # -----------------------------------------------------------------------
-    # Settings toggles
-    # -----------------------------------------------------------------------
+    elif data == "trades_mode_demo":
+        limit = context.user_data.get("trades_limit")
+        active_asset = context.user_data.get("trades_asset_filter", "ALL")
+        await _render_trades(update, limit=limit, demo=True, asset=active_asset)
+
+    # ---- Trade asset filters ----
+    elif data.startswith("trades_asset_"):
+        asset = data[len("trades_asset_"):]
+        context.user_data["trades_asset_filter"] = asset
+        limit = context.user_data.get("trades_limit")
+        demo = await queries.is_demo_mode()
+        await _render_trades(update, limit=limit, demo=demo, asset=asset)
+
+    # ---- Settings toggles ----
     elif data == "toggle_autotrade":
         current = await queries.is_autotrade_enabled()
         await queries.set_setting("autotrade_enabled", "false" if current else "true")
-        await cmd_settings(update, context)
-
-    elif data == "toggle_sizing":
-        current = await queries.get_sizing_mode()
-        new_mode = "half-kelly" if current == "fixed" else "fixed"
-        await queries.set_setting("sizing_mode", new_mode)
         await cmd_settings(update, context)
 
     elif data == "toggle_demo":
@@ -420,198 +312,92 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await queries.set_setting("demo_mode", "false" if current else "true")
         await cmd_settings(update, context)
 
+    elif data == "toggle_sizing":
+        current = await queries.get_sizing_mode()
+        new_mode = "kelly" if current == "fixed" else "fixed"
+        await queries.set_setting("sizing_mode", new_mode)
+        await cmd_settings(update, context)
+
     elif data == "toggle_auto_redeem":
         current = await queries.is_auto_redeem_enabled()
         await queries.set_setting("auto_redeem_enabled", "false" if current else "true")
         await cmd_settings(update, context)
 
-    # -----------------------------------------------------------------------
-    # Input prompts  (Suggestion 4: show cancel button + waiting indicator)
-    # -----------------------------------------------------------------------
     elif data == "change_amount":
-        await query.answer()
-        await _safe_edit(
-            query,
-            "\U0001f4b5 <b>Set Trade Amount</b>\n\n"
-            "Type the new amount in USDC (e.g. <code>2.50</code>):\n\n"
-            "<i>Waiting for your input\u2026</i>",
-            reply_markup=cancel_input_keyboard(),
+        context.user_data["awaiting"] = AWAIT_AMOUNT
+        await _edit_or_reply(
+            update,
+            "\U0001f4b5 Enter the new trade amount in USDC (e.g. <code>2.50</code>):",
+            keyboards.cancel_input_keyboard(),
         )
-        context.user_data["awaiting_amount"] = True
 
     elif data == "change_demo_bankroll":
-        await query.answer()
-        await _safe_edit(
-            query,
-            "\U0001f4b0 <b>Set Demo Bankroll</b>\n\n"
-            "Type the new bankroll amount in USDC (e.g. <code>500</code>).\n"
-            "This also resets the current demo balance to the new amount.\n\n"
-            "<i>Waiting for your input\u2026</i>",
-            reply_markup=cancel_input_keyboard(),
+        context.user_data["awaiting"] = AWAIT_DEMO_BANKROLL
+        await _edit_or_reply(
+            update,
+            "\U0001f4dd Enter the new demo bankroll in USDC (e.g. <code>200</code>):",
+            keyboards.cancel_input_keyboard(),
         )
-        context.user_data["awaiting_demo_bankroll"] = True
 
-    # -----------------------------------------------------------------------
-    # Reset Demo — two-step confirmation  (Suggestion 2)
-    # -----------------------------------------------------------------------
     elif data == "reset_demo":
-        bankroll = await queries.get_demo_bankroll()
-        balance = await queries.get_demo_balance()
-        diff = balance - bankroll
-        sign = "+" if diff >= 0 else ""
-        await query.answer()
-        await _safe_edit(
-            query,
-            "\U0001f504 <b>Reset Demo Balance?</b>\n\n"
-            f"Current balance: <b>${balance:.2f}</b> ({sign}${diff:.2f})\n"
-            f"Will reset to: <b>${bankroll:.2f}</b>\n\n"
-            "\u26a0\ufe0f This cannot be undone.",
-            reply_markup=reset_demo_confirm_keyboard(),
+        await _edit_or_reply(
+            update,
+            "\u26a0\ufe0f <b>Reset Demo Balance?</b>\n\nThis will restore your demo balance to the bankroll amount.",
+            keyboards.reset_demo_confirm_keyboard(),
         )
 
     elif data == "reset_demo_confirm":
         bankroll = await queries.get_demo_bankroll()
         await queries.set_demo_balance(bankroll)
-        await query.answer(f"Demo balance reset to ${bankroll:.2f}")
         await cmd_settings(update, context)
 
     else:
-        await query.answer("Unknown action")
+        log.debug("Unhandled callback: %s", data)
 
 
 # ---------------------------------------------------------------------------
-# Text handler (for trade amount / demo bankroll input)
+# Text message handler (input collection)
 # ---------------------------------------------------------------------------
 
-@auth_check
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # --- Trade amount input ---
-    if context.user_data.get("awaiting_amount"):
-        context.user_data["awaiting_amount"] = False
-        raw = update.message.text.strip().replace("$", "")
-        try:
-            amount = float(raw)
-            if amount <= 0:
-                raise ValueError("non-positive")
-        except ValueError:
-            await update.message.reply_text(
-                "\u274c Invalid amount. Please enter a positive number (e.g. 2.50)."
-            )
-            return
-
-        amount = round(amount, 2)
-        try:
-            await queries.set_setting("trade_amount_usdc", str(amount))
-            await update.message.reply_text(
-                f"\u2705 Trade amount updated to <b>${amount:.2f}</b>",
-                parse_mode="HTML",
-            )
-            # Show settings panel again
-            autotrade = await queries.is_autotrade_enabled()
-            sizing_mode = await queries.get_sizing_mode()
-            demo_on = await queries.is_demo_mode()
-            demo_balance = await queries.get_demo_balance()
-            auto_redeem = await queries.is_auto_redeem_enabled()
-            kb = settings_keyboard(autotrade, amount, sizing_mode, demo_on, demo_balance, auto_redeem_on=auto_redeem)
-            await update.message.reply_text(
-                "\u2699\ufe0f <b>Settings</b>\n\n"
-                "<b>TRADING</b>  AutoTrade | Amount | Sizing | Redeem\n"
-                "<b>DEMO</b>  Toggle | Balance | Reset\n\n"
-                "Tap a button to change:",
-                reply_markup=kb,
-                parse_mode="HTML",
-            )
-        except Exception as exc:
-            log.exception("text_handler DB write failed")
-            await update.message.reply_text(format_error("Saving setting", exc), parse_mode="HTML")
+async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = context.user_data.get("awaiting")
+    if not state:
         return
 
-    # --- Demo bankroll input ---
-    if context.user_data.get("awaiting_demo_bankroll"):
-        context.user_data["awaiting_demo_bankroll"] = False
-        raw = update.message.text.strip().replace("$", "")
+    text = (update.message.text or "").strip()
+    context.user_data.pop("awaiting", None)
+
+    if state == AWAIT_AMOUNT:
         try:
-            amount = float(raw)
+            amount = float(text)
             if amount <= 0:
-                raise ValueError("non-positive")
+                raise ValueError("Must be > 0")
+            await queries.set_setting("trade_amount_usdc", str(round(amount, 2)))
+            await update.message.reply_text(
+                f"\u2705 Trade amount updated to <b>${amount:.2f}</b>.",
+                parse_mode="HTML",
+            )
         except ValueError:
             await update.message.reply_text(
-                "\u274c Invalid amount. Please enter a positive number (e.g. 500)."
+                "\u274c Invalid amount. Please enter a positive number.",
+                parse_mode="HTML",
             )
-            return
+        await cmd_settings(update, context)
 
-        amount = round(amount, 2)
+    elif state == AWAIT_DEMO_BANKROLL:
         try:
-            await queries.set_setting("demo_bankroll", str(amount))
-            await queries.set_demo_balance(amount)
+            bankroll = float(text)
+            if bankroll <= 0:
+                raise ValueError("Must be > 0")
+            await queries.set_setting("demo_bankroll", str(round(bankroll, 2)))
+            await queries.set_demo_balance(bankroll)
             await update.message.reply_text(
-                f"\u2705 Demo bankroll set to <b>${amount:.2f}</b> (balance reset)",
+                f"\u2705 Demo bankroll set to <b>${bankroll:.2f}</b> and balance reset.",
                 parse_mode="HTML",
             )
-            # Show settings panel again
-            autotrade = await queries.is_autotrade_enabled()
-            trade_amount = await queries.get_trade_amount()
-            sizing_mode = await queries.get_sizing_mode()
-            demo_on = await queries.is_demo_mode()
-            auto_redeem = await queries.is_auto_redeem_enabled()
-            kb = settings_keyboard(autotrade, trade_amount, sizing_mode, demo_on, amount, auto_redeem_on=auto_redeem)
+        except ValueError:
             await update.message.reply_text(
-                "\u2699\ufe0f <b>Settings</b>\n\n"
-                "<b>TRADING</b>  AutoTrade | Amount | Sizing | Redeem\n"
-                "<b>DEMO</b>  Toggle | Balance | Reset\n\n"
-                "Tap a button to change:",
-                reply_markup=kb,
+                "\u274c Invalid amount. Please enter a positive number.",
                 parse_mode="HTML",
             )
-        except Exception as exc:
-            log.exception("text_handler DB write failed")
-            await update.message.reply_text(format_error("Saving setting", exc), parse_mode="HTML")
-        return
-
-
-# ---------------------------------------------------------------------------
-# Register all handlers
-# ---------------------------------------------------------------------------
-
-def register(application) -> None:
-    """Attach all command and callback handlers to the Telegram Application."""
-    application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(CommandHandler("status", cmd_status))
-    application.add_handler(CommandHandler("signals", cmd_signals))
-    application.add_handler(CommandHandler("trades", cmd_trades))
-    application.add_handler(CommandHandler("demo", cmd_demo))
-    application.add_handler(CommandHandler("settings", cmd_settings))
-    application.add_handler(CommandHandler("help", cmd_help))
-    application.add_handler(CallbackQueryHandler(callback_router))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-
-    async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Global error handler — logs and sends error to Telegram."""
-        import traceback
-
-        exc = context.error
-        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-        log.error("Unhandled exception:\n%s", tb)
-
-        # Determine where to send the error
-        chat_id: int | None = None
-        if isinstance(update, Update):
-            if update.effective_chat:
-                chat_id = update.effective_chat.id
-            elif update.callback_query and update.callback_query.message:
-                chat_id = update.callback_query.message.chat_id
-
-        if chat_id is None:
-            chat_id = cfg.TELEGRAM_CHAT_ID  # fall back to the configured chat
-
-        text = format_error("Unexpected error", exc)
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode="HTML",
-            )
-        except Exception:
-            log.exception("Failed to send error notification to Telegram")
-
-    application.add_error_handler(_error_handler)
+        await cmd_settings(update, context)

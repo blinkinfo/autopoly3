@@ -5,6 +5,19 @@ from __future__ import annotations
 from typing import Any
 
 
+# Asset badge map — shown in live notifications
+_ASSET_BADGE: dict[str, str] = {
+    "BTC": "\U0001f7e0 BTC",  # orange circle
+    "ETH": "\U0001f535 ETH",  # blue circle
+    "XRP": "\U0001f7e3 XRP",  # purple circle
+    "SOL": "\U0001f7e1 SOL",  # yellow circle
+}
+
+
+def _badge(asset: str) -> str:
+    return _ASSET_BADGE.get(asset, asset)
+
+
 # ---------------------------------------------------------------------------
 # Live notifications (sent by scheduler)
 # ---------------------------------------------------------------------------
@@ -17,13 +30,15 @@ def format_signal(
     autotrade: bool,
     sizing_mode: str = "fixed",
     trade_amount: float | None = None,
+    asset: str = "BTC",
 ) -> str:
     side_emoji = "\U0001f4c8" if side == "Up" else "\U0001f4c9"
     at_line = "\U0001f916 AutoTrade: ON \u2192 Order Placed" if autotrade else "\U0001f916 AutoTrade: OFF"
     sizing_label = "Fixed" if sizing_mode == "fixed" else "Half-Kelly"
     amount_str = f"${trade_amount:.2f}" if trade_amount is not None else "N/A"
+    badge = _badge(asset)
     return (
-        "\U0001f4e1 <b>Signal Fired!</b>\n"
+        f"\U0001f4e1 <b>[{badge}] Signal Fired!</b>\n"
         "\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
         f"\u2502 \u23f0 Slot: {slot_start_str}-{slot_end_str} UTC\n"
         f"\u2502 {side_emoji} Side: {side}\n"
@@ -39,9 +54,11 @@ def format_skip(
     slot_end_str: str,
     up_price: float,
     down_price: float,
+    asset: str = "BTC",
 ) -> str:
+    badge = _badge(asset)
     return (
-        "\u23ed\ufe0f <b>No Signal</b>\n"
+        f"\u23ed\ufe0f <b>[{badge}] No Signal</b>\n"
         "\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
         f"\u2502 \u23f0 Slot: {slot_start_str}-{slot_end_str} UTC\n"
         f"\u2502 \U0001f4c8 Up Ask: ${up_price:.2f}  |  \U0001f4c9 Down Ask: ${down_price:.2f}\n"
@@ -59,15 +76,17 @@ def format_resolution(
     pnl: float | None = None,
     is_demo: bool = False,
     demo_balance: float | None = None,
+    asset: str = "BTC",
 ) -> str:
     result_price = 1.00 if is_win else 0.00
     icon = "\u2705" if is_win else "\u274c"
     label = "WIN" if is_win else "LOSS"
     side_emoji = "\U0001f4c8" if side == "Up" else "\U0001f4c9"
     demo_prefix = "[DEMO] " if is_demo else ""
+    badge = _badge(asset)
 
     lines = [
-        f"{icon} <b>{demo_prefix}Signal Result \u2014 {label}</b>",
+        f"{icon} <b>{demo_prefix}[{badge}] Signal Result \u2014 {label}</b>",
         "\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
         f"\u2502 \u23f0 Slot: {slot_start_str}-{slot_end_str} UTC",
         f"\u2502 {side_emoji} Side: {side}",
@@ -86,7 +105,6 @@ def format_redemption_notification(
     redemptions: list[dict],
     total_usdc: float,
 ) -> str:
-    """Format a Telegram notification for redeemed positions."""
     count = len(redemptions)
     lines = [
         f"\U0001f4b0 <b>Redeemed {count} position(s) for +${total_usdc:.2f} USDC</b>",
@@ -103,7 +121,6 @@ def format_redemption_notification(
 
 
 def format_redemption_error(error_msg: str) -> str:
-    """Format a Telegram notification for a redemption failure."""
     return (
         "\u274c <b>Auto-Redeem Error</b>\n"
         "\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
@@ -178,7 +195,6 @@ def format_status(
     sizing_mode: str = "fixed",
     demo_balance: float | None = None,
 ) -> str:
-    """Suggestion 5: top-line health summary before the detail fields."""
     conn_icon = "\U0001f7e2" if connected else "\U0001f534"
     conn_text = "Connected" if connected else "Disconnected"
     at_text = "ON" if autotrade else "OFF"
@@ -187,7 +203,6 @@ def format_status(
     mode_text = "Demo" if demo_mode else "Real"
     sizing_label = "Fixed" if sizing_mode == "fixed" else "Half-Kelly"
 
-    # Build quick health summary line
     health_parts = ["ONLINE" if connected else "OFFLINE"]
     if autotrade:
         health_parts.append(f"{mode_text} trading")
@@ -226,7 +241,6 @@ def format_menu_header(
     total_trades: int,
     pending_count: int = 0,
 ) -> str:
-    """Suggestion 6: dynamic main-menu header showing key stats at a glance."""
     pnl_sign = "+" if net_pnl >= 0 else ""
     pending_str = f"  ({pending_count} pending)" if pending_count > 0 else ""
     return (
@@ -259,15 +273,15 @@ def format_demo_status(
 
 
 def format_recent_signals(signals: list[dict[str, Any]]) -> str:
-    """Suggestion 3: cleaner mini-card format, scannable win/loss at a glance."""
     if not signals:
         return "\nNo signals recorded yet."
     lines = ["\n\U0001f4cb <b>Recent Signals:</b>"]
     for s in signals:
         ss = s["slot_start"].split(" ")[-1] if " " in s["slot_start"] else s["slot_start"]
         se = s["slot_end"].split(" ")[-1] if " " in s["slot_end"] else s["slot_end"]
+        asset_tag = s.get("asset") or "BTC"
         if s["skipped"]:
-            lines.append(f"\u23ed\ufe0f  SKIP   {ss}\u2013{se} UTC")
+            lines.append(f"\u23ed\ufe0f  {asset_tag:>3}  SKIP   {ss}\u2013{se} UTC")
         else:
             if s.get("is_win") == 1:
                 icon = "\u2705"
@@ -281,13 +295,12 @@ def format_recent_signals(signals: list[dict[str, Any]]) -> str:
             side = s.get("side") or "?"
             price_str = f"${s.get('entry_price', 0):.2f}"
             lines.append(
-                f"{icon}  {side:>4}  {price_str}  {ss}\u2013{se}  [{result}]"
+                f"{icon}  {asset_tag:>3}  {side:>4}  {price_str}  {ss}\u2013{se}  [{result}]"
             )
     return "\n".join(lines)
 
 
 def format_recent_trades(trades: list[dict[str, Any]]) -> str:
-    """Suggestion 3: cleaner mini-card format for trades."""
     if not trades:
         return "\nNo trades recorded yet."
     lines = ["\n\U0001f4cb <b>Recent Trades:</b>"]
@@ -303,6 +316,7 @@ def format_recent_trades(trades: list[dict[str, Any]]) -> str:
         else:
             icon = "\u23f3"
             result = "PENDING"
+        asset_tag = t.get("asset") or "BTC"
         demo_tag = "[D] " if t.get("is_demo") else ""
         side = t.get("side") or "?"
         amt_str = f"${t.get('amount_usdc', 0):.2f}"
@@ -311,7 +325,7 @@ def format_recent_trades(trades: list[dict[str, Any]]) -> str:
             sign = "+" if t["pnl"] >= 0 else ""
             pnl_str = f"  {sign}${t['pnl']:.2f}"
         lines.append(
-            f"{icon}  {demo_tag}{side:>4}  {amt_str}  {ss}\u2013{se}{pnl_str}  [{result}]"
+            f"{icon}  {asset_tag:>3}  {demo_tag}{side:>4}  {amt_str}  {ss}\u2013{se}{pnl_str}  [{result}]"
         )
     return "\n".join(lines)
 
@@ -331,24 +345,18 @@ def format_help() -> str:
         "\u2022 <b>Demo Mode</b> \u2014 Paper trade with simulated balance (no real orders)\n"
         "\u2022 <b>Demo Bankroll</b> \u2014 Starting balance for demo sessions; reset anytime\n\n"
         "<b>How it works:</b>\n"
-        "Every 5 minutes the bot checks the NEXT slot's BTC up/down "
-        "prices 85 seconds before the current slot ends. If either "
-        "side \u2265 $0.53, a signal fires and trades that slot. "
-        "With AutoTrade ON, a FOK market order is placed automatically "
-        "(or simulated in Demo mode)."
+        "Every 5 minutes the bot checks the NEXT slot's prices for "
+        "BTC, ETH, XRP, and SOL up/down markets 85 seconds before the "
+        "current slot ends. If either side \u2265 $0.53, a signal fires "
+        "and trades that slot. With AutoTrade ON, a FOK market order is "
+        "placed automatically (or simulated in Demo mode). All 4 assets "
+        "run in parallel on the same 5-minute schedule."
     )
 
 
 def format_error(context: str, exc: Exception) -> str:
-    """Generic error card for user-facing Telegram error messages.
-
-    Args:
-        context: Short label for where the error occurred (e.g. "Status check").
-        exc: The exception instance.
-    """
     exc_type = type(exc).__name__
     msg = str(exc)
-    # Truncate long messages so the Telegram message stays readable
     if len(msg) > 200:
         msg = msg[:197] + "..."
     return (

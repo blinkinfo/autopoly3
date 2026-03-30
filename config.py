@@ -46,6 +46,18 @@ SIGNAL_THRESHOLD: float = 0.53
 SIGNAL_LEAD_TIME: int = 85  # seconds before slot end to check signal
 
 # ---------------------------------------------------------------------------
+# Multi-asset support
+# ---------------------------------------------------------------------------
+SUPPORTED_ASSETS: list[str] = ["BTC", "ETH", "XRP", "SOL"]
+
+ASSET_SLUG_PREFIX: dict[str, str] = {
+    "BTC": "btc",
+    "ETH": "eth",
+    "XRP": "xrp",
+    "SOL": "sol",
+}
+
+# ---------------------------------------------------------------------------
 # Redemption
 # ---------------------------------------------------------------------------
 DATA_API_HOST: str = "https://data-api.polymarket.com"

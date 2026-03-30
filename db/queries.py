@@ -116,10 +116,7 @@ async def get_win_rate_for_kelly_demo() -> float:
 
 
 async def get_win_rate_for_kelly(demo: bool = False) -> float:
-    """Dispatcher: return win rate for Kelly sizing based on mode.
-
-    Routes to demo or real trade history depending on the `demo` flag.
-    """
+    """Dispatcher: return win rate for Kelly sizing based on mode."""
     if demo:
         return await get_win_rate_for_kelly_demo()
     return await get_win_rate_for_kelly_real()
@@ -137,12 +134,14 @@ async def insert_signal(
     entry_price: float | None,
     opposite_price: float | None,
     skipped: bool = False,
+    asset: str = "BTC",
 ) -> int:
     async with aiosqlite.connect(_db()) as db:
         cursor = await db.execute(
             "INSERT INTO signals (slot_start, slot_end, slot_timestamp, side, "
-            "entry_price, opposite_price, skipped) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (slot_start, slot_end, slot_timestamp, side, entry_price, opposite_price, 1 if skipped else 0),
+            "entry_price, opposite_price, skipped, asset) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (slot_start, slot_end, slot_timestamp, side, entry_price, opposite_price,
+             1 if skipped else 0, asset),
         )
         await db.commit()
         return cursor.lastrowid  # type: ignore[return-value]
@@ -158,12 +157,18 @@ async def resolve_signal(signal_id: int, outcome: str, is_win: bool) -> None:
         await db.commit()
 
 
-async def get_recent_signals(n: int = 10) -> list[dict[str, Any]]:
+async def get_recent_signals(n: int = 10, asset: str | None = None) -> list[dict[str, Any]]:
     async with aiosqlite.connect(_db()) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM signals ORDER BY id DESC LIMIT ?", (n,)
-        )
+        if asset is not None:
+            cursor = await db.execute(
+                "SELECT * FROM signals WHERE asset = ? ORDER BY id DESC LIMIT ?",
+                (asset, n),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT * FROM signals ORDER BY id DESC LIMIT ?", (n,)
+            )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
@@ -178,12 +183,18 @@ async def get_unresolved_signals() -> list[dict[str, Any]]:
         return [dict(r) for r in rows]
 
 
-async def get_last_signal() -> dict[str, Any] | None:
+async def get_last_signal(asset: str | None = None) -> dict[str, Any] | None:
     async with aiosqlite.connect(_db()) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM signals WHERE skipped = 0 ORDER BY id DESC LIMIT 1"
-        )
+        if asset is not None:
+            cursor = await db.execute(
+                "SELECT * FROM signals WHERE skipped = 0 AND asset = ? ORDER BY id DESC LIMIT 1",
+                (asset,),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT * FROM signals WHERE skipped = 0 ORDER BY id DESC LIMIT 1"
+            )
         row = await cursor.fetchone()
         return dict(row) if row else None
 
@@ -203,14 +214,15 @@ async def insert_trade(
     fill_price: float | None = None,
     status: str = "pending",
     demo: bool = False,
+    asset: str = "BTC",
 ) -> int:
     async with aiosqlite.connect(_db()) as db:
         cursor = await db.execute(
             "INSERT INTO trades (signal_id, slot_start, slot_end, side, entry_price, "
-            "amount_usdc, order_id, fill_price, status, is_demo) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "amount_usdc, order_id, fill_price, status, is_demo, asset) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (signal_id, slot_start, slot_end, side, entry_price, amount_usdc,
-             order_id, fill_price, status, 1 if demo else 0),
+             order_id, fill_price, status, 1 if demo else 0, asset),
         )
         await db.commit()
         return cursor.lastrowid  # type: ignore[return-value]
@@ -268,13 +280,19 @@ async def resolve_trade(trade_id: int, outcome: str, is_win: bool, pnl: float) -
         await db.commit()
 
 
-async def get_recent_trades(n: int = 10, demo: bool = False) -> list[dict[str, Any]]:
+async def get_recent_trades(n: int = 10, demo: bool = False, asset: str | None = None) -> list[dict[str, Any]]:
     async with aiosqlite.connect(_db()) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM trades WHERE is_demo = ? ORDER BY id DESC LIMIT ?",
-            (1 if demo else 0, n),
-        )
+        if asset is not None:
+            cursor = await db.execute(
+                "SELECT * FROM trades WHERE is_demo = ? AND asset = ? ORDER BY id DESC LIMIT ?",
+                (1 if demo else 0, asset, n),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT * FROM trades WHERE is_demo = ? ORDER BY id DESC LIMIT ?",
+                (1 if demo else 0, n),
+            )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
@@ -354,41 +372,64 @@ def _compute_streaks(results: list[int]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Analytics  (Bug fix: all SQL uses parameterized queries — no f-string interpolation)
+# Analytics
 # ---------------------------------------------------------------------------
 
-async def get_signal_stats(limit: int | None = None) -> dict[str, Any]:
+async def get_signal_stats(limit: int | None = None, asset: str | None = None) -> dict[str, Any]:
     async with aiosqlite.connect(_db()) as db:
         db.row_factory = aiosqlite.Row
 
+        asset_filter = "AND asset = ?" if asset is not None else ""
+        asset_params = (asset,) if asset is not None else ()
+
         # Total signals (non-skipped)
         row = await (await db.execute(
-            "SELECT COUNT(*) as cnt FROM signals WHERE skipped = 0"
+            f"SELECT COUNT(*) as cnt FROM signals WHERE skipped = 0 {asset_filter}",
+            asset_params,
         )).fetchone()
         total = row["cnt"]
 
         # Skip count
         row2 = await (await db.execute(
-            "SELECT COUNT(*) as cnt FROM signals WHERE skipped = 1"
+            f"SELECT COUNT(*) as cnt FROM signals WHERE skipped = 1 {asset_filter}",
+            asset_params,
         )).fetchone()
         skip_count = row2["cnt"]
 
-        # Resolved signals for stats — fully parameterized
+        # Resolved signals for stats
         if limit is not None:
-            cursor = await db.execute(
-                "SELECT is_win FROM ("
-                "  SELECT id, is_win FROM signals "
-                "  WHERE skipped = 0 AND is_win IS NOT NULL "
-                "  ORDER BY id DESC LIMIT ?"
-                ") ORDER BY id ASC",
-                (limit,),
-            )
+            if asset is not None:
+                cursor = await db.execute(
+                    "SELECT is_win FROM ("
+                    "  SELECT id, is_win FROM signals "
+                    "  WHERE skipped = 0 AND is_win IS NOT NULL AND asset = ?"
+                    "  ORDER BY id DESC LIMIT ?"
+                    ") ORDER BY id ASC",
+                    (asset, limit),
+                )
+            else:
+                cursor = await db.execute(
+                    "SELECT is_win FROM ("
+                    "  SELECT id, is_win FROM signals "
+                    "  WHERE skipped = 0 AND is_win IS NOT NULL "
+                    "  ORDER BY id DESC LIMIT ?"
+                    ") ORDER BY id ASC",
+                    (limit,),
+                )
         else:
-            cursor = await db.execute(
-                "SELECT is_win FROM signals "
-                "WHERE skipped = 0 AND is_win IS NOT NULL "
-                "ORDER BY id ASC"
-            )
+            if asset is not None:
+                cursor = await db.execute(
+                    "SELECT is_win FROM signals "
+                    "WHERE skipped = 0 AND is_win IS NOT NULL AND asset = ? "
+                    "ORDER BY id ASC",
+                    (asset,),
+                )
+            else:
+                cursor = await db.execute(
+                    "SELECT is_win FROM signals "
+                    "WHERE skipped = 0 AND is_win IS NOT NULL "
+                    "ORDER BY id ASC"
+                )
 
         rows = await cursor.fetchall()
         results = [r["is_win"] for r in rows]
@@ -410,34 +451,56 @@ async def get_signal_stats(limit: int | None = None) -> dict[str, Any]:
     }
 
 
-async def get_trade_stats(limit: int | None = None, demo: bool = False) -> dict[str, Any]:
+async def get_trade_stats(limit: int | None = None, demo: bool = False, asset: str | None = None) -> dict[str, Any]:
     demo_flag = 1 if demo else 0
     async with aiosqlite.connect(_db()) as db:
         db.row_factory = aiosqlite.Row
 
-        # Fully parameterized — no f-string interpolation
         if limit is not None:
-            cursor = await db.execute(
-                "SELECT is_win, amount_usdc, pnl FROM ("
-                "  SELECT id, is_win, amount_usdc, pnl FROM trades "
-                "  WHERE is_win IS NOT NULL AND is_demo = ? "
-                "  ORDER BY id DESC LIMIT ?"
-                ") ORDER BY id ASC",
-                (demo_flag, limit),
-            )
+            if asset is not None:
+                cursor = await db.execute(
+                    "SELECT is_win, amount_usdc, pnl FROM ("
+                    "  SELECT id, is_win, amount_usdc, pnl FROM trades "
+                    "  WHERE is_win IS NOT NULL AND is_demo = ? AND asset = ?"
+                    "  ORDER BY id DESC LIMIT ?"
+                    ") ORDER BY id ASC",
+                    (demo_flag, asset, limit),
+                )
+            else:
+                cursor = await db.execute(
+                    "SELECT is_win, amount_usdc, pnl FROM ("
+                    "  SELECT id, is_win, amount_usdc, pnl FROM trades "
+                    "  WHERE is_win IS NOT NULL AND is_demo = ? "
+                    "  ORDER BY id DESC LIMIT ?"
+                    ") ORDER BY id ASC",
+                    (demo_flag, limit),
+                )
         else:
-            cursor = await db.execute(
-                "SELECT is_win, amount_usdc, pnl FROM trades "
-                "WHERE is_win IS NOT NULL AND is_demo = ? ORDER BY id ASC",
-                (demo_flag,),
-            )
+            if asset is not None:
+                cursor = await db.execute(
+                    "SELECT is_win, amount_usdc, pnl FROM trades "
+                    "WHERE is_win IS NOT NULL AND is_demo = ? AND asset = ? ORDER BY id ASC",
+                    (demo_flag, asset),
+                )
+            else:
+                cursor = await db.execute(
+                    "SELECT is_win, amount_usdc, pnl FROM trades "
+                    "WHERE is_win IS NOT NULL AND is_demo = ? ORDER BY id ASC",
+                    (demo_flag,),
+                )
 
         rows = await cursor.fetchall()
 
-        total_row = await (await db.execute(
-            "SELECT COUNT(*) as cnt FROM trades WHERE is_demo = ?",
-            (demo_flag,),
-        )).fetchone()
+        if asset is not None:
+            total_row = await (await db.execute(
+                "SELECT COUNT(*) as cnt FROM trades WHERE is_demo = ? AND asset = ?",
+                (demo_flag, asset),
+            )).fetchone()
+        else:
+            total_row = await (await db.execute(
+                "SELECT COUNT(*) as cnt FROM trades WHERE is_demo = ?",
+                (demo_flag,),
+            )).fetchone()
         total_trades = total_row["cnt"]
 
     results = [r["is_win"] for r in rows]

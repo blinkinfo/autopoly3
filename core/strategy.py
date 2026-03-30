@@ -15,20 +15,21 @@ from polymarket.markets import (
 log = logging.getLogger(__name__)
 
 
-async def check_signal() -> dict[str, Any] | None:
+async def check_signal(asset: str = "BTC") -> dict[str, Any] | None:
     """Called at T-85 s before the current slot N ends.
 
-    1. Fetch slot N+1 live prices from Gamma API.
+    1. Fetch slot N+1 live prices from Gamma API for the given asset.
     2. If UP price >= threshold -> signal "Up".
     3. If DOWN price >= threshold -> signal "Down".
     4. If neither >= threshold -> return skip sentinel.
 
     Returns a dict (signal or skip) or ``None`` on hard error.
     """
-    slot_n1 = get_next_slot_info()
+    slot_n1 = get_next_slot_info(asset=asset)
 
     log.debug(
-        "Checking signal for slot N+1 %s (%s-%s UTC)",
+        "[%s] Checking signal for slot N+1 %s (%s-%s UTC)",
+        asset,
         slot_n1["slug"],
         slot_n1["slot_start_str"],
         slot_n1["slot_end_str"],
@@ -37,13 +38,16 @@ async def check_signal() -> dict[str, Any] | None:
     # Fetch N+1 prices — the market we're evaluating AND trading
     prices = await get_slot_prices(slot_n1["slug"])
     if prices is None:
-        log.error("Could not fetch prices for slot N+1 %s", slot_n1["slug"])
+        log.error("[%s] Could not fetch prices for slot N+1 %s", asset, slot_n1["slug"])
         return None
 
     up_price = prices["up_price"]
     down_price = prices["down_price"]
 
-    log.debug("Slot N+1 ask prices  Up=%.4f  Down=%.4f  (threshold=%.2f)", up_price, down_price, cfg.SIGNAL_THRESHOLD)
+    log.debug(
+        "[%s] Slot N+1 ask prices  Up=%.4f  Down=%.4f  (threshold=%.2f)",
+        asset, up_price, down_price, cfg.SIGNAL_THRESHOLD,
+    )
 
     side: str | None = None
     entry_price: float | None = None
@@ -63,6 +67,7 @@ async def check_signal() -> dict[str, Any] | None:
         # No signal — return a skip sentinel so the scheduler can log it
         return {
             "skipped": True,
+            "asset": asset,
             "up_price": up_price,
             "down_price": down_price,
             "slot_n1_start_full": slot_n1["slot_start_full"],
@@ -76,7 +81,8 @@ async def check_signal() -> dict[str, Any] | None:
     token_id = prices["up_token_id"] if side == "Up" else prices["down_token_id"]
 
     log.info(
-        "SIGNAL: %s @ ask $%.4f for slot N+1 %s-%s UTC  token=%s",
+        "[%s] SIGNAL: %s @ ask $%.4f for slot N+1 %s-%s UTC  token=%s",
+        asset,
         side,
         entry_price,
         slot_n1["slot_start_str"],
@@ -86,6 +92,7 @@ async def check_signal() -> dict[str, Any] | None:
 
     return {
         "skipped": False,
+        "asset": asset,
         "side": side,
         "entry_price": entry_price,
         "opposite_price": opposite_price,
