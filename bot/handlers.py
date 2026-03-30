@@ -14,6 +14,8 @@ from bot import formatters, keyboards
 from db import queries
 from core import scheduler as sched
 
+from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
+
 log = logging.getLogger(__name__)
 
 # Startup timestamp for uptime display
@@ -22,6 +24,36 @@ _BOT_START_TIME = datetime.now(timezone.utc)
 # States for awaiting user text input
 AWAIT_AMOUNT = "await_amount"
 AWAIT_DEMO_BANKROLL = "await_demo_bankroll"
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap functions called by main.py
+# ---------------------------------------------------------------------------
+
+def set_poly_client(poly_client: Any) -> None:
+    """Inject the Polymarket client into the scheduler (canonical holder)."""
+    sched._poly_client = poly_client
+
+
+def set_start_time() -> None:
+    """Reset the bot start-time used for uptime display."""
+    global _BOT_START_TIME
+    _BOT_START_TIME = datetime.now(timezone.utc)
+
+
+def register(application: Any) -> None:
+    """Register all command and callback handlers with the Telegram Application."""
+    application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CommandHandler("signals", cmd_signals))
+    application.add_handler(CommandHandler("trades", cmd_trades))
+    application.add_handler(CommandHandler("settings", cmd_settings))
+    application.add_handler(CommandHandler("demo", cmd_demo))
+    application.add_handler(CommandHandler("help", cmd_help))
+    application.add_handler(CallbackQueryHandler(callback_router))
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, text_input_handler)
+    )
 
 
 # ---------------------------------------------------------------------------
