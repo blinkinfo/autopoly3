@@ -45,19 +45,19 @@ async def check_signal(asset: str = "BTC") -> dict[str, Any] | None:
     down_price = prices["down_price"]
 
     log.debug(
-        "[%s] Slot N+1 ask prices  Up=%.4f  Down=%.4f  (threshold=%.2f)",
-        asset, up_price, down_price, cfg.SIGNAL_THRESHOLD,
+        "[%s] Slot N+1 ask prices  Up=%.4f  Down=%.4f  (valid_prices=%s)",
+        asset, up_price, down_price, cfg.SIGNAL_VALID_PRICES,
     )
 
     side: str | None = None
     entry_price: float | None = None
     opposite_price: float | None = None
 
-    if up_price >= cfg.SIGNAL_THRESHOLD:
+    if up_price in cfg.SIGNAL_VALID_PRICES:
         side = "Up"
         entry_price = up_price
         opposite_price = down_price
-    elif down_price >= cfg.SIGNAL_THRESHOLD:
+    elif down_price in cfg.SIGNAL_VALID_PRICES:
         side = "Down"
         entry_price = down_price
         opposite_price = up_price
